@@ -15,6 +15,18 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
+    // Load maps from the maps directory
+    int mapsLoaded = engine_load_maps(&engine, "maps");
+    if (mapsLoaded > 0) {
+        printf("Loaded %d maps\n", mapsLoaded);
+        printf("Press 1-%d keys to switch between maps\n", mapsLoaded);
+        
+        // Set the first map as active
+        engine_set_map(&engine, 1);
+    } else {
+        printf("No maps loaded, using default map\n");
+    }
+    
     // Run the main game loop
     int result = engine_run(&engine);
     

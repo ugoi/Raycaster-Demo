@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
+#include <dirent.h>
 
 #include "engine.h"
 
@@ -34,6 +36,15 @@ static const int DEFAULT_MAP[MAP_HEIGHT][MAP_WIDTH] = {
     {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1}
 };
 
+// Example maps collection
+#define MAX_MAPS 10
+
+// Map format key codes for file parsing
+#define MAP_MARKER "MAP:"
+#define NAME_MARKER "NAME:"
+#define START_MARKER "START:"
+#define DATA_MARKER "DATA:"
+
 // ****************************************************
 // Private (static) function declarations
 // ****************************************************
@@ -53,6 +64,9 @@ static SDL_Texture* engine_get_texture(Engine *engine, int index);
 // Draw a textured vertical line
 static void engine_draw_textured_line(Engine *engine, int x, int drawStart, int drawEnd, 
                             double wallX, int texNum, double perpWallDist, int side);
+
+// Load a map from a string buffer
+static int engine_load_map_from_buffer(Engine *engine, const char *buffer, Map *map);
 
 // ****************************************************
 // Public API Implementation
@@ -94,6 +108,11 @@ int engine_init(Engine *engine) {
         return 0;
     }
     
+    // Initialize map system
+    engine->availableMaps = NULL;
+    engine->mapCount = 0;
+    engine->currentMapIndex = 0;
+    
     // Initialize timing system
     engine->lastTime = SDL_GetTicks();
     
@@ -108,7 +127,7 @@ int engine_init(Engine *engine) {
     }
     
     // Initialize player at starting position
-    engine_init_player(engine, 22.0, 12.0);
+    engine_init_player(engine, engine->map.startX, engine->map.startY);
     
     // Set running flag
     engine->running = 1;
@@ -119,6 +138,12 @@ int engine_init(Engine *engine) {
 // Clean up resources allocated by the engine
 void engine_cleanup(Engine *engine) {
     engine_cleanup_textures(engine);
+    
+    // Clean up maps
+    if (engine->availableMaps) {
+        free(engine->availableMaps);
+        engine->availableMaps = NULL;
+    }
     
     if (engine->renderer) {
         SDL_DestroyRenderer(engine->renderer);
@@ -145,10 +170,13 @@ void engine_init_player(Engine *engine, double posX, double posY) {
     engine->player.rotSpeed = 3.0;  // Radians per second
 }
 
-// Initialize the map
+// Initialize the default map
 void engine_init_map(Engine *engine) {
     engine->map.width = MAP_WIDTH;
     engine->map.height = MAP_HEIGHT;
+    engine->map.startX = 22.0;
+    engine->map.startY = 12.0;
+    strcpy(engine->map.name, "Default Map");
     
     // Copy default map
     for (int y = 0; y < MAP_HEIGHT; y++) {
@@ -158,12 +186,266 @@ void engine_init_map(Engine *engine) {
     }
 }
 
+// Create a map with the given data
+int engine_create_map(Engine *engine, const int *mapData, int width, int height, 
+                     double startX, double startY, const char *name) {
+    // Validate input parameters
+    if (!mapData || width <= 0 || height <= 0 || width > MAP_WIDTH || height > MAP_HEIGHT) {
+        return 0;
+    }
+    
+    // Expand map array if needed
+    if (engine->mapCount == 0) {
+        engine->availableMaps = (Map*)malloc(MAX_MAPS * sizeof(Map));
+        if (!engine->availableMaps) {
+            return 0;  // Memory allocation failed
+        }
+    } else if (engine->mapCount >= MAX_MAPS) {
+        return 0;  // Reached maximum map count
+    }
+    
+    // Fill in the new map
+    Map *newMap = &engine->availableMaps[engine->mapCount];
+    newMap->width = width;
+    newMap->height = height;
+    newMap->startX = startX;
+    newMap->startY = startY;
+    strncpy(newMap->name, name, sizeof(newMap->name) - 1);
+    newMap->name[sizeof(newMap->name) - 1] = '\0';  // Ensure null termination
+    
+    // Copy the map data
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            newMap->data[y][x] = mapData[y * width + x];
+        }
+    }
+    
+    // Clear any remaining cells if the map is smaller than MAP_WIDTH/MAP_HEIGHT
+    for (int y = 0; y < MAP_HEIGHT; y++) {
+        for (int x = 0; x < MAP_WIDTH; x++) {
+            if (y >= height || x >= width) {
+                newMap->data[y][x] = 0;
+            }
+        }
+    }
+    
+    engine->mapCount++;
+    return 1;
+}
+
+// Load a specific map by index
+int engine_set_map(Engine *engine, int mapIndex) {
+    if (mapIndex < 0 || mapIndex >= engine->mapCount) {
+        return 0;
+    }
+    
+    // Copy the selected map to the active map
+    Map *selectedMap = &engine->availableMaps[mapIndex];
+    memcpy(&engine->map, selectedMap, sizeof(Map));
+    
+    // Reset player position to map's starting position
+    engine_init_player(engine, engine->map.startX, engine->map.startY);
+    
+    engine->currentMapIndex = mapIndex;
+    return 1;
+}
+
+// Get a list of available map names
+const char** engine_get_map_names(Engine *engine) {
+    if (engine->mapCount == 0) {
+        return NULL;
+    }
+    
+    const char **names = (const char**)malloc(engine->mapCount * sizeof(char*));
+    if (!names) {
+        return NULL;
+    }
+    
+    for (int i = 0; i < engine->mapCount; i++) {
+        names[i] = engine->availableMaps[i].name;
+    }
+    
+    return names;
+}
+
+// Load a map from a file
+int engine_load_map_from_file(Engine *engine, const char *filename) {
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        fprintf(stderr, "Could not open map file: %s\n", filename);
+        return 0;
+    }
+    
+    // Read file into a buffer
+    fseek(file, 0, SEEK_END);
+    long fileSize = ftell(file);
+    rewind(file);
+    
+    char *buffer = (char*)malloc(fileSize + 1);
+    if (!buffer) {
+        fclose(file);
+        return 0;
+    }
+    
+    size_t bytesRead = fread(buffer, 1, fileSize, file);
+    buffer[bytesRead] = '\0';  // Null terminate the string
+    fclose(file);
+    
+    // Load the map from the buffer into a new map
+    if (engine->mapCount >= MAX_MAPS) {
+        free(buffer);
+        return 0;  // Reached maximum map count
+    }
+    
+    // If this is the first map, allocate the maps array
+    if (engine->mapCount == 0) {
+        engine->availableMaps = (Map*)malloc(MAX_MAPS * sizeof(Map));
+        if (!engine->availableMaps) {
+            free(buffer);
+            return 0;  // Memory allocation failed
+        }
+    }
+    
+    // Parse the map from the buffer
+    Map *newMap = &engine->availableMaps[engine->mapCount];
+    int result = engine_load_map_from_buffer(engine, buffer, newMap);
+    
+    free(buffer);
+    
+    if (result) {
+        engine->mapCount++;
+        return 1;
+    }
+    
+    return 0;
+}
+
+// Load maps from files in a directory
+int engine_load_maps(Engine *engine, const char *directory) {
+    DIR *dir;
+    struct dirent *ent;
+    
+    if ((dir = opendir(directory)) == NULL) {
+        fprintf(stderr, "Could not open directory: %s\n", directory);
+        return 0;
+    }
+    
+    int mapsLoaded = 0;
+    
+    while ((ent = readdir(dir)) != NULL) {
+        // Skip . and ..
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        
+        // Check if the file has a .map extension
+        char *ext = strrchr(ent->d_name, '.');
+        if (!ext || strcmp(ext, ".map") != 0) {
+            continue;
+        }
+        
+        // Build the full path
+        char fullPath[512];
+        snprintf(fullPath, sizeof(fullPath), "%s/%s", directory, ent->d_name);
+        
+        // Load the map
+        if (engine_load_map_from_file(engine, fullPath)) {
+            mapsLoaded++;
+        }
+    }
+    
+    closedir(dir);
+    return mapsLoaded;
+}
+
 // ****************************************************
 // Private functions implementation
 // ****************************************************
 
+// Load a map from a string buffer
+static int engine_load_map_from_buffer(Engine *engine, const char *buffer, Map *map) {
+    // Default values
+    map->width = MAP_WIDTH;
+    map->height = MAP_HEIGHT;
+    map->startX = 22.0;
+    map->startY = 12.0;
+    strcpy(map->name, "Unnamed Map");
+    
+    // Clear the map data
+    memset(map->data, 0, sizeof(map->data));
+    
+    // Parse the buffer line by line
+    char line[512];
+    int lineNum = 0;
+    int dataLine = 0;
+    int parsingData = 0;
+    
+    const char *bufferPtr = buffer;
+    
+    while (*bufferPtr) {
+        // Read a line
+        int i = 0;
+        while (*bufferPtr && *bufferPtr != '\n' && i < sizeof(line) - 1) {
+            line[i++] = *bufferPtr++;
+        }
+        line[i] = '\0';
+        
+        // Skip the newline character
+        if (*bufferPtr == '\n') {
+            bufferPtr++;
+        }
+        
+        // Skip empty lines
+        if (strlen(line) == 0) {
+            continue;
+        }
+        
+        // Check for section markers
+        if (strncmp(line, NAME_MARKER, strlen(NAME_MARKER)) == 0) {
+            // Parse map name
+            strncpy(map->name, line + strlen(NAME_MARKER), sizeof(map->name) - 1);
+            map->name[sizeof(map->name) - 1] = '\0';  // Ensure null termination
+            continue;
+        } else if (strncmp(line, START_MARKER, strlen(START_MARKER)) == 0) {
+            // Parse starting position
+            sscanf(line + strlen(START_MARKER), "%lf,%lf", &map->startX, &map->startY);
+            continue;
+        } else if (strncmp(line, DATA_MARKER, strlen(DATA_MARKER)) == 0) {
+            // Start parsing map data
+            parsingData = 1;
+            dataLine = 0;
+            continue;
+        }
+        
+        if (parsingData && dataLine < MAP_HEIGHT) {
+            // Parse a row of map data
+            int col = 0;
+            char *token = strtok(line, " ,\t");
+            
+            while (token && col < MAP_WIDTH) {
+                map->data[dataLine][col++] = atoi(token);
+                token = strtok(NULL, " ,\t");
+            }
+            
+            dataLine++;
+        }
+        
+        lineNum++;
+    }
+    
+    // Ensure the map has at least some data
+    if (dataLine == 0) {
+        return 0;
+    }
+    
+    map->height = dataLine;
+    return 1;
+}
+
 // Get wall color based on map value and side
 static void engine_get_wall_color(Engine *engine, int mapValue, int side, SDL_Color *color) {
+    (void)engine; // Suppress unused parameter warning
+    
     // Base colors for different wall types
     switch (mapValue) {
         case 1: // Red wall
@@ -334,6 +616,15 @@ static int engine_handle_events(Engine *engine) {
                 engine->running = 0;
                 return 1;  // ESC key pressed, signal to quit
             }
+            
+            // Map switching with number keys
+            if (event.key.keysym.sym >= SDLK_1 && 
+                event.key.keysym.sym <= SDLK_9 && 
+                (event.key.keysym.sym - SDLK_1) < engine->mapCount) {
+                
+                int mapIndex = event.key.keysym.sym - SDLK_1;
+                engine_set_map(engine, mapIndex);
+            }
         }
     }
     
@@ -446,7 +737,7 @@ void engine_move_player(Engine *engine, double deltaTime) {
 
 // Draw a textured vertical line
 static void engine_draw_textured_line(Engine *engine, int x, int drawStart, int drawEnd, 
-                              double wallX, int texNum, double perpWallDist, int side) {
+                             double wallX, int texNum, double perpWallDist, int side) {
     // Ensure valid texture number
     if (texNum < 0 || texNum >= NUM_TEXTURES || !engine->textures.textures[texNum]) {
         return;

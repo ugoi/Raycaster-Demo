@@ -45,6 +45,9 @@ typedef struct Map {
     int data[MAP_HEIGHT][MAP_WIDTH];
     int width;
     int height;
+    double startX;  // Starting X position for player
+    double startY;  // Starting Y position for player
+    char name[64];  // Map name
 } Map;
 
 // Structure for the textures
@@ -62,6 +65,9 @@ typedef struct Engine {
     Uint32 lastTime;  // For timing
     const Uint8 *keystate;  // For input
     int running;  // Game state
+    Map *availableMaps;     // Array of available maps
+    int mapCount;           // Number of available maps
+    int currentMapIndex;    // Index of currently loaded map
 } Engine;
 
 // PUBLIC API:
@@ -75,7 +81,7 @@ void engine_cleanup(Engine *engine);
 // Initialize player with starting position
 void engine_init_player(Engine *engine, double posX, double posY);
 
-// Initialize the map
+// Initialize the default map
 void engine_init_map(Engine *engine);
 
 // Initialize textures system
@@ -92,6 +98,22 @@ void engine_render_scene(Engine *engine);
 
 // Main game loop
 int engine_run(Engine *engine);
+
+// Load maps from files in a directory
+int engine_load_maps(Engine *engine, const char *directory);
+
+// Load a map from a file
+int engine_load_map_from_file(Engine *engine, const char *filename);
+
+// Load a specific map by index
+int engine_set_map(Engine *engine, int mapIndex);
+
+// Create a map with the given data
+int engine_create_map(Engine *engine, const int *mapData, int width, int height, 
+                      double startX, double startY, const char *name);
+
+// Get a list of available map names
+const char** engine_get_map_names(Engine *engine);
 
 // Note: Internal functions like engine_get_wall_color, engine_calculate_delta_time,
 // engine_handle_events, etc. are not exposed in this public API.
